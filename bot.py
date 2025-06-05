@@ -1,8 +1,6 @@
 import os
 import asyncio
-import wave
 import io
-import time
 
 from speech_segmenter import SentenceSegmenter
 import discord
@@ -33,47 +31,90 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 record_queue = asyncio.Queue()
 
-class VADSink(discord.sinks.Sink):
+class StreamingWhisperSink(discord.sinks.Sink):
+    """Stream audio to Whisper in ~500ms chunks while also using VAD."""
+
     def __init__(self, *, loop=None, queue=None):
         super().__init__()
         self.segmenter = SentenceSegmenter()
         self.loop = loop
         self.queue = queue
+        self.buffers = {}
+        self.chunk_bytes = int(48000 * 0.5 * 2 * 2)  # 500ms of stereo 16bit audio
 
     def write(self, data, user):
-        for segment in self.segmenter.process(data, user):
-            self._finish(user, segment)
-
-    def _finish(self, user, audio):
-        if not audio:
-            return
-        # handle both discord.Member objects and plain user IDs
         user_id = getattr(user, "id", user)
-        buffer = io.BytesIO()
-        with wave.open(buffer, 'wb') as wf:
-            wf.setnchannels(2)
-            wf.setsampwidth(2)
-            wf.setframerate(48000)
-            wf.writeframes(audio)
-        # queue the user id instead of the user object for later lookup
+        buf = self.buffers.setdefault(user_id, bytearray())
+        buf.extend(data)
+
+        while len(buf) >= self.chunk_bytes:
+            chunk = bytes(buf[: self.chunk_bytes])
+            del buf[: self.chunk_bytes]
+            self.loop.call_soon_threadsafe(
+                self.queue.put_nowait, (user_id, chunk, False)
+            )
+
+        for segment in self.segmenter.process(data, user_id):
+            self._finish(user_id, segment)
+
+    def _finish(self, user_id, segment):
+        buf = self.buffers.get(user_id, bytearray())
+        if buf:
+            self.loop.call_soon_threadsafe(
+                self.queue.put_nowait, (user_id, bytes(buf), False)
+            )
+            buf.clear()
         self.loop.call_soon_threadsafe(
-            self.queue.put_nowait, (user_id, buffer.getvalue())
+            self.queue.put_nowait, (user_id, None, True)
         )
 
-def transcribe_bytes(audio_bytes: bytes) -> str:
-    """Transcribe audio bytes to Korean text using faster-whisper."""
-    segments, _ = model.transcribe(io.BytesIO(audio_bytes), language="ko")
+    def cleanup(self):
+        for user_id, buf in self.buffers.items():
+            if buf:
+                self.loop.call_soon_threadsafe(
+                    self.queue.put_nowait, (user_id, bytes(buf), True)
+                )
+        super().cleanup()
+
+def transcribe_stream(audio_bytes: bytes) -> str:
+    """Transcribe audio bytes using faster-whisper with low latency."""
+    segments, _ = model.transcribe(
+        io.BytesIO(audio_bytes), language="ko", beam_size=1, best_of=1
+    )
     return "".join(seg.text for seg in segments).strip()
 
 async def transcribe_worker(text_channel):
+    messages = {}
+    partials = {}
     while True:
-        user_id, audio_bytes = await record_queue.get()
+        user_id, audio_bytes, finished = await record_queue.get()
         try:
-            loop = asyncio.get_running_loop()
-            text = await loop.run_in_executor(None, transcribe_bytes, audio_bytes)
-            user = bot.get_user(user_id)
-            name = user.display_name if user else f"User {user_id}"
-            await text_channel.send(f"{name}: {text}")
+            if audio_bytes:
+                loop = asyncio.get_running_loop()
+                text = await loop.run_in_executor(
+                    None, transcribe_stream, audio_bytes
+                )
+                if text:
+                    partials[user_id] = partials.get(user_id, "") + text
+
+            display = partials.get(user_id, "")
+            if finished and display:
+                user = bot.get_user(user_id)
+                name = user.display_name if user else f"User {user_id}"
+                if user_id in messages:
+                    await messages[user_id].edit(content=f"{name}: {display}")
+                else:
+                    await text_channel.send(f"{name}: {display}")
+                messages.pop(user_id, None)
+                partials[user_id] = ""
+            elif not finished and display:
+                user = bot.get_user(user_id)
+                name = user.display_name if user else f"User {user_id}"
+                content = f"{name}: {display}..."
+                if user_id in messages:
+                    await messages[user_id].edit(content=content)
+                else:
+                    messages[user_id] = await text_channel.send(content)
         except Exception as e:
             await text_channel.send(f"Error transcribing for <@{user_id}>: {e}")
         finally:
@@ -86,7 +127,7 @@ async def join(ctx: commands.Context):
         return
     channel = ctx.author.voice.channel
     vc = await channel.connect()
-    sink = VADSink(loop=bot.loop, queue=record_queue)
+    sink = StreamingWhisperSink(loop=bot.loop, queue=record_queue)
     vc.start_recording(sink, finished_callback, ctx.channel)
     bot.loop.create_task(transcribe_worker(ctx.channel))
     await ctx.send("Recording started")
