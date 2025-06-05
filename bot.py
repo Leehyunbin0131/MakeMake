@@ -95,8 +95,28 @@ def transcribe_stream(audio_bytes: bytes) -> str:
 async def transcribe_worker(text_channel):
     messages = {}
     partials = {}
+    last_update = {}
+    timeout = 1.5  # seconds of inactivity before auto-finalizing
     while True:
-        user_id, audio_bytes, finished = await record_queue.get()
+        try:
+            user_id, audio_bytes, finished = await asyncio.wait_for(
+                record_queue.get(), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            now = asyncio.get_running_loop().time()
+            for uid, ts in list(last_update.items()):
+                if now - ts >= timeout and partials.get(uid):
+                    user = bot.get_user(uid)
+                    name = user.display_name if user else f"User {uid}"
+                    if uid in messages:
+                        await messages[uid].edit(content=f"{name}: {partials[uid]}")
+                        messages.pop(uid, None)
+                    else:
+                        await text_channel.send(f"{name}: {partials[uid]}")
+                    partials[uid] = ""
+                    last_update.pop(uid, None)
+            continue
+
         try:
             if audio_bytes:
                 loop = asyncio.get_running_loop()
@@ -105,6 +125,7 @@ async def transcribe_worker(text_channel):
                 )
                 if text:
                     partials[user_id] = partials.get(user_id, "") + text
+                    last_update[user_id] = loop.time()
 
             display = partials.get(user_id, "")
             if finished and display:
@@ -116,6 +137,7 @@ async def transcribe_worker(text_channel):
                     await text_channel.send(f"{name}: {display}")
                 messages.pop(user_id, None)
                 partials[user_id] = ""
+                last_update.pop(user_id, None)
             elif not finished and display:
                 user = bot.get_user(user_id)
                 name = user.display_name if user else f"User {user_id}"
@@ -124,6 +146,7 @@ async def transcribe_worker(text_channel):
                     await messages[user_id].edit(content=content)
                 else:
                     messages[user_id] = await text_channel.send(content)
+                last_update[user_id] = asyncio.get_running_loop().time()
         except Exception as e:
             await text_channel.send(f"Error transcribing for <@{user_id}>: {e}")
         finally:
