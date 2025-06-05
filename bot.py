@@ -1,6 +1,7 @@
 import os
 import asyncio
 import wave
+import io
 import time
 
 from speech_segmenter import SentenceSegmenter
@@ -48,34 +49,34 @@ class VADSink(discord.sinks.Sink):
             return
         # handle both discord.Member objects and plain user IDs
         user_id = getattr(user, "id", user)
-        path = f"record_{user_id}_{int(time.time()*1000)}.wav"
-        with wave.open(path, 'wb') as wf:
+        buffer = io.BytesIO()
+        with wave.open(buffer, 'wb') as wf:
             wf.setnchannels(2)
             wf.setsampwidth(2)
             wf.setframerate(48000)
             wf.writeframes(audio)
         # queue the user id instead of the user object for later lookup
-        self.loop.call_soon_threadsafe(self.queue.put_nowait, (user_id, path))
+        self.loop.call_soon_threadsafe(
+            self.queue.put_nowait, (user_id, buffer.getvalue())
+        )
 
-def transcribe_file(path: str) -> str:
-    """Transcribe an audio file to Korean text using faster-whisper."""
-    segments, _ = model.transcribe(path, language="ko")
+def transcribe_bytes(audio_bytes: bytes) -> str:
+    """Transcribe audio bytes to Korean text using faster-whisper."""
+    segments, _ = model.transcribe(io.BytesIO(audio_bytes), language="ko")
     return "".join(seg.text for seg in segments).strip()
 
 async def transcribe_worker(text_channel):
     while True:
-        user_id, path = await record_queue.get()
+        user_id, audio_bytes = await record_queue.get()
         try:
             loop = asyncio.get_running_loop()
-            text = await loop.run_in_executor(None, transcribe_file, path)
+            text = await loop.run_in_executor(None, transcribe_bytes, audio_bytes)
             user = bot.get_user(user_id)
             name = user.display_name if user else f"User {user_id}"
             await text_channel.send(f"{name}: {text}")
         except Exception as e:
             await text_channel.send(f"Error transcribing for <@{user_id}>: {e}")
         finally:
-            if os.path.exists(path):
-                os.remove(path)
             record_queue.task_done()
 
 @bot.command(name="join")
