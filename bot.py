@@ -51,13 +51,15 @@ class VADSink(discord.sinks.Sink):
         buf = self.buffers.pop(user, None)
         if not buf:
             return
-        path = f"record_{user}_{int(time.time()*1000)}.wav"
+        # use the user's id in the filename to avoid illegal characters
+        path = f"record_{user.id}_{int(time.time()*1000)}.wav"
         with wave.open(path, 'wb') as wf:
             wf.setnchannels(2)
             wf.setsampwidth(2)
             wf.setframerate(48000)
             wf.writeframes(bytes(buf))
-        self.loop.call_soon_threadsafe(self.queue.put_nowait, (user, path))
+        # queue the user id instead of the user object for later lookup
+        self.loop.call_soon_threadsafe(self.queue.put_nowait, (user.id, path))
 
 async def transcribe_worker(text_channel):
     while True:
