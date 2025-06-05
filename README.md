@@ -14,7 +14,7 @@ This repository contains an example Discord bot that records users in a voice ch
 Install dependencies with `pip` (Python 3.11 recommended):
 
 ```bash
-pip install py-cord openai-whisper torch webrtcvad numpy tqdm tiktoken more-itertools numba
+pip install py-cord openai-whisper torch webrtcvad numpy tqdm tiktoken more-itertools numba PyNaCl
 ```
 
 FFmpeg must also be installed and accessible in `PATH`.
