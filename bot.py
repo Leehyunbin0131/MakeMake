@@ -1,6 +1,7 @@
 import os
 import asyncio
 import io
+import wave
 
 from speech_segmenter import SentenceSegmenter
 import discord
@@ -78,8 +79,16 @@ class StreamingWhisperSink(discord.sinks.Sink):
 
 def transcribe_stream(audio_bytes: bytes) -> str:
     """Transcribe audio bytes using faster-whisper with low latency."""
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, 'wb') as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)  # 16-bit
+        wf.setframerate(48000)
+        wf.writeframes(audio_bytes)
+    wav_buffer.seek(0)
+
     segments, _ = model.transcribe(
-        io.BytesIO(audio_bytes), language="ko", beam_size=1, best_of=1
+        wav_buffer, language="ko", beam_size=1, best_of=1
     )
     return "".join(seg.text for seg in segments).strip()
 
