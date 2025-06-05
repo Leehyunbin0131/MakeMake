@@ -6,6 +6,7 @@ from collections import defaultdict
 
 import numpy as np
 import webrtcvad
+import _webrtcvad
 import discord
 from discord.ext import commands
 import whisper
@@ -48,7 +49,7 @@ class VADSink(discord.sinks.Sink):
         mono = np.frombuffer(data, dtype=np.int16)[::2].tobytes()
         try:
             speech = self.vad.is_speech(mono, sample_rate=48000)
-        except webrtcvad.Error:
+        except _webrtcvad.Error:
             # ignore frames of an invalid size
             return
         now = time.monotonic()
