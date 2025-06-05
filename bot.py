@@ -9,7 +9,8 @@ import webrtcvad
 import _webrtcvad
 import discord
 from discord.ext import commands
-import whisper
+import torch
+from faster_whisper import WhisperModel
 try:
     import nacl
 except ImportError as e:
@@ -22,8 +23,10 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
 
-# load whisper model once
-model = whisper.load_model("base")
+# load faster-whisper model once with Korean support
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model = WhisperModel("base", device=device,
+                     compute_type="float16" if device == "cuda" else "int8")
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -73,15 +76,20 @@ class VADSink(discord.sinks.Sink):
         # queue the user id instead of the user object for later lookup
         self.loop.call_soon_threadsafe(self.queue.put_nowait, (user_id, path))
 
+def transcribe_file(path: str) -> str:
+    """Transcribe an audio file to Korean text using faster-whisper."""
+    segments, _ = model.transcribe(path, language="ko")
+    return "".join(seg.text for seg in segments).strip()
+
 async def transcribe_worker(text_channel):
     while True:
         user_id, path = await record_queue.get()
         try:
             loop = asyncio.get_running_loop()
-            result = await loop.run_in_executor(None, model.transcribe, path)
+            text = await loop.run_in_executor(None, transcribe_file, path)
             user = bot.get_user(user_id)
             name = user.display_name if user else f"User {user_id}"
-            await text_channel.send(f"{name}: {result['text']}")
+            await text_channel.send(f"{name}: {text}")
         except Exception as e:
             await text_channel.send(f"Error transcribing for <@{user_id}>: {e}")
         finally:
