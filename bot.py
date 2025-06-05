@@ -2,11 +2,8 @@ import os
 import asyncio
 import wave
 import time
-from collections import defaultdict
 
-import numpy as np
-import webrtcvad
-import _webrtcvad
+from speech_segmenter import SentenceSegmenter
 import discord
 from discord.ext import commands
 import torch
@@ -36,34 +33,18 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 record_queue = asyncio.Queue()
 
 class VADSink(discord.sinks.Sink):
-    def __init__(self, *, silence_timeout=2.0, loop=None, queue=None):
+    def __init__(self, *, loop=None, queue=None):
         super().__init__()
-        self.vad = webrtcvad.Vad(2)
-        self.silence_timeout = silence_timeout
-        self.buffers = defaultdict(bytearray)
-        self.last_voice = defaultdict(lambda: time.monotonic())
+        self.segmenter = SentenceSegmenter()
         self.loop = loop
         self.queue = queue
 
     def write(self, data, user):
-        buf = self.buffers[user]
-        buf.extend(data)
+        for segment in self.segmenter.process(data, user):
+            self._finish(user, segment)
 
-        mono = np.frombuffer(data, dtype=np.int16)[::2].tobytes()
-        try:
-            speech = self.vad.is_speech(mono, sample_rate=48000)
-        except _webrtcvad.Error:
-            # ignore frames of an invalid size
-            return
-        now = time.monotonic()
-        if speech:
-            self.last_voice[user] = now
-        elif now - self.last_voice[user] >= self.silence_timeout and len(buf) > 0:
-            self._finish(user)
-
-    def _finish(self, user):
-        buf = self.buffers.pop(user, None)
-        if not buf:
+    def _finish(self, user, audio):
+        if not audio:
             return
         # handle both discord.Member objects and plain user IDs
         user_id = getattr(user, "id", user)
@@ -72,7 +53,7 @@ class VADSink(discord.sinks.Sink):
             wf.setnchannels(2)
             wf.setsampwidth(2)
             wf.setframerate(48000)
-            wf.writeframes(bytes(buf))
+            wf.writeframes(audio)
         # queue the user id instead of the user object for later lookup
         self.loop.call_soon_threadsafe(self.queue.put_nowait, (user_id, path))
 
