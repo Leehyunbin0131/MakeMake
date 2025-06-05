@@ -134,7 +134,12 @@ async def leave(ctx: commands.Context):
 def main():
     global recorder
     # initialize RealtimeSTT recorder without microphone
-    recorder = AudioToTextRecorder(use_microphone=False)
+    # explicitly use CPU with float32 to avoid ctranslate2 warnings
+    recorder = AudioToTextRecorder(
+        use_microphone=False,
+        device="cpu",
+        compute_type="float32",
+    )
     bot.run(TOKEN)
 
 
