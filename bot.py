@@ -17,8 +17,8 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
 
-# initialize RealtimeSTT recorder without microphone
-recorder = AudioToTextRecorder(use_microphone=False)
+# placeholder for RealtimeSTT recorder instance
+recorder = None
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -130,4 +130,13 @@ async def leave(ctx: commands.Context):
     else:
         await ctx.send("Not in a voice channel")
 
-bot.run(TOKEN)
+
+def main():
+    global recorder
+    # initialize RealtimeSTT recorder without microphone
+    recorder = AudioToTextRecorder(use_microphone=False)
+    bot.run(TOKEN)
+
+
+if __name__ == "__main__":
+    main()
