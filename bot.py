@@ -46,7 +46,11 @@ class VADSink(discord.sinks.Sink):
         buf.extend(data)
 
         mono = np.frombuffer(data, dtype=np.int16)[::2].tobytes()
-        speech = self.vad.is_speech(mono, sample_rate=48000)
+        try:
+            speech = self.vad.is_speech(mono, sample_rate=48000)
+        except webrtcvad.Error:
+            # ignore frames of an invalid size
+            return
         now = time.monotonic()
         if speech:
             self.last_voice[user] = now
