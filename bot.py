@@ -9,6 +9,12 @@ import webrtcvad
 import discord
 from discord.ext import commands
 import whisper
+try:
+    import nacl
+except ImportError as e:
+    raise RuntimeError(
+        "PyNaCl library is required for voice support. Install with 'pip install PyNaCl'"
+    ) from e
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
