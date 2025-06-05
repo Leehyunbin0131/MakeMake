@@ -1,13 +1,10 @@
 import os
 import asyncio
-import io
-import wave
 
 from speech_segmenter import SentenceSegmenter
 import discord
 from discord.ext import commands
-import torch
-from faster_whisper import WhisperModel
+from RealtimeSTT import AudioToTextRecorder
 try:
     import nacl
 except ImportError as e:
@@ -20,10 +17,8 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN environment variable is not set")
 
-# load faster-whisper model once with Korean support
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model = WhisperModel("base", device=device,
-                     compute_type="float16" if device == "cuda" else "int8")
+# initialize RealtimeSTT recorder without microphone
+recorder = AudioToTextRecorder(use_microphone=False)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -78,75 +73,33 @@ class StreamingWhisperSink(discord.sinks.Sink):
         super().cleanup()
 
 def transcribe_stream(audio_bytes: bytes) -> str:
-    """Transcribe audio bytes using faster-whisper with low latency."""
-    wav_buffer = io.BytesIO()
-    with wave.open(wav_buffer, 'wb') as wf:
-        wf.setnchannels(2)
-        wf.setsampwidth(2)  # 16-bit
-        wf.setframerate(48000)
-        wf.writeframes(audio_bytes)
-    wav_buffer.seek(0)
+    """Transcribe audio bytes using RealtimeSTT."""
+    import numpy as np
 
-    segments, _ = model.transcribe(
-        wav_buffer, language="ko", beam_size=1, best_of=1
-    )
-    return "".join(seg.text for seg in segments).strip()
+    data = np.frombuffer(audio_bytes, dtype=np.int16).reshape(-1, 2)
+    mono = data.mean(axis=1).astype(np.int16)
+
+    recorder.feed_audio(mono, original_sample_rate=48000)
+    text = recorder.text()
+    recorder.clear_audio_queue()
+    return text.strip()
 
 async def transcribe_worker(text_channel):
-    messages = {}
-    partials = {}
-    last_update = {}
-    timeout = 1.5  # seconds of inactivity before auto-finalizing
+    buffers = {}
     while True:
-        try:
-            user_id, audio_bytes, finished = await asyncio.wait_for(
-                record_queue.get(), timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            now = asyncio.get_running_loop().time()
-            for uid, ts in list(last_update.items()):
-                if now - ts >= timeout and partials.get(uid):
-                    user = bot.get_user(uid)
-                    name = user.display_name if user else f"User {uid}"
-                    if uid in messages:
-                        await messages[uid].edit(content=f"{name}: {partials[uid]}")
-                        messages.pop(uid, None)
-                    else:
-                        await text_channel.send(f"{name}: {partials[uid]}")
-                    partials[uid] = ""
-                    last_update.pop(uid, None)
-            continue
-
+        user_id, audio_bytes, finished = await record_queue.get()
         try:
             if audio_bytes:
-                loop = asyncio.get_running_loop()
-                text = await loop.run_in_executor(
-                    None, transcribe_stream, audio_bytes
-                )
-                if text:
-                    partials[user_id] = partials.get(user_id, "") + text
-                    last_update[user_id] = loop.time()
-
-            display = partials.get(user_id, "")
-            if finished and display:
-                user = bot.get_user(user_id)
-                name = user.display_name if user else f"User {user_id}"
-                if user_id in messages:
-                    await messages[user_id].edit(content=f"{name}: {display}")
-                else:
-                    await text_channel.send(f"{name}: {display}")
-                messages.pop(user_id, None)
-                partials[user_id] = ""
-                last_update.pop(user_id, None)
-            elif not finished and display:
-                user = bot.get_user(user_id)
-                name = user.display_name if user else f"User {user_id}"
-                content = f"{name}: {display}..."
-                if user_id in messages:
-                    await messages[user_id].edit(content=content)
-                else:
-                    messages[user_id] = await text_channel.send(content)
-                last_update[user_id] = asyncio.get_running_loop().time()
+                buffers[user_id] = buffers.get(user_id, b"") + audio_bytes
+            if finished:
+                audio = buffers.pop(user_id, b"")
+                if audio:
+                    loop = asyncio.get_running_loop()
+                    text = await loop.run_in_executor(None, transcribe_stream, audio)
+                    if text:
+                        user = bot.get_user(user_id)
+                        name = user.display_name if user else f"User {user_id}"
+                        await text_channel.send(f"{name}: {text}")
         except Exception as e:
             await text_channel.send(f"Error transcribing for <@{user_id}>: {e}")
         finally:
